@@ -27,6 +27,7 @@
 #include <limits>
 #include <numeric>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 
 namespace cudf::io::parquet::detail {
@@ -196,6 +197,24 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
 
   // create this before we fork streams
   kernel_error error_code(_stream);
+
+  // Single-pass binning of page bytes by kernel_mask for DECODE stats
+  {
+    auto const& page_mask = subpass_page_mask_span();
+    std::unordered_map<uint32_t, std::pair<size_t, size_t>> decode_bin;  // mask -> (bytes, pages)
+    for (size_t i = 0; i < subpass.pages.size(); ++i) {
+      if (!page_mask.is_empty() && !page_mask[i]) { continue; }
+      auto const m = static_cast<uint32_t>(subpass.pages[i].kernel_mask);
+      if (m == 0) { continue; }
+      auto& [bytes, pages] = decode_bin[m];
+      bytes += subpass.pages[i].uncompressed_page_size;
+      ++pages;
+    }
+    for (auto const& [mask, counts] : decode_bin) {
+      _file_itm_data.pipeline_stats.stages.emplace_back(
+        cudf::io::parquet_decode_stats{mask, counts.first, counts.second});
+    }
+  }
 
   // get the number of streams we need from the pool and tell them to wait on the H2D copies
   int const nkernels = std::bitset<32>(kernel_mask).count();
@@ -676,6 +695,8 @@ table_with_metadata reader_impl::read_chunk_internal(read_mode mode)
     out_metadata.num_row_groups_after_bloom_filter =
       _file_itm_data.surviving_row_groups.after_bloom_filter;
   }
+  out_metadata.total_compressed_bytes   = _file_itm_data.total_compressed_bytes;
+  out_metadata.total_uncompressed_bytes = _file_itm_data.total_uncompressed_bytes;
 
   // no work to do (this can happen on the first pass if we have no rows to read)
   if (!has_more_work()) {
@@ -718,6 +739,9 @@ table_with_metadata reader_impl::read_chunk_internal(read_mode mode)
 
   // Parse data into the output buffers.
   decode_page_data(mode, read_info.skip_rows, read_info.num_rows);
+
+  // Copy pipeline stats after all stages (including decode) have run
+  out_metadata.pipeline_stats = _file_itm_data.pipeline_stats;
 
   // Create the final output cudf columns.
   for (size_t i = 0; i < _output_buffers.size(); ++i) {

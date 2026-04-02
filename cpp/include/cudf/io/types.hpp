@@ -14,9 +14,11 @@
 #include <cudf/types.hpp>
 #include <cudf/utilities/span.hpp>
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
+#include <variant>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -261,6 +263,77 @@ struct column_name_info {
 };
 
 /**
+ * @brief Byte statistics for the IO_READ stage (source to device transfer).
+ */
+struct parquet_io_read_stats {
+  size_t bytes;  ///< Total bytes read from source
+};
+
+/**
+ * @brief Byte statistics for the DECOMPRESS stage (one entry per codec).
+ */
+struct parquet_decompress_stats {
+  compression_type codec;  ///< Compression algorithm
+  size_t input_bytes;      ///< Compressed bytes in
+  size_t output_bytes;     ///< Decompressed bytes out
+  size_t num_pages;        ///< Number of pages decompressed
+};
+
+/**
+ * @brief Byte statistics for the PREPROCESS_LEVELS stage (def/rep level decoding).
+ */
+struct parquet_preprocess_levels_stats {
+  size_t input_bytes;  ///< Total level bytes processed
+  size_t num_pages;    ///< Number of pages processed
+};
+
+/**
+ * @brief Byte statistics for the COMPUTE_PAGE_SIZES stage (row counts and nesting sizes).
+ */
+struct parquet_compute_page_sizes_stats {
+  size_t input_bytes;  ///< Total uncompressed page bytes processed
+  size_t num_pages;    ///< Number of pages processed
+};
+
+/**
+ * @brief Byte statistics for the COMPUTE_STRING_SIZES stage (string column byte sizes).
+ */
+struct parquet_compute_string_sizes_stats {
+  size_t input_bytes;  ///< Total uncompressed string page bytes processed
+  size_t num_pages;    ///< Number of string pages processed
+};
+
+/**
+ * @brief Byte statistics for the DECODE stage (one entry per kernel type).
+ */
+struct parquet_decode_stats {
+  uint32_t kernel_mask;  ///< Decode kernel bitmask identifying the kernel type
+  size_t input_bytes;    ///< Uncompressed page bytes decoded
+  size_t num_pages;      ///< Number of pages decoded
+};
+
+/**
+ * @brief A single pipeline stage's byte statistics, as a variant over all stage types.
+ */
+using parquet_stage_stats = std::variant<parquet_io_read_stats,
+                                         parquet_decompress_stats,
+                                         parquet_preprocess_levels_stats,
+                                         parquet_compute_page_sizes_stats,
+                                         parquet_compute_string_sizes_stats,
+                                         parquet_decode_stats>;
+
+/**
+ * @brief Aggregated byte statistics for the Parquet read pipeline.
+ *
+ * Contains one entry per stage per batch, in pipeline execution order.
+ * Stages that did not execute (e.g. DECOMPRESS for uncompressed files)
+ * have no entries.
+ */
+struct parquet_pipeline_stats {
+  std::vector<parquet_stage_stats> stages;  ///< Per-stage stats in pipeline order
+};
+
+/**
  * @brief Table metadata returned by IO readers.
  */
 struct table_metadata {
@@ -284,6 +357,15 @@ struct table_metadata {
     num_row_groups_after_bloom_filter;  //!< Number of remaining row groups after bloom filter.
                                         //!< std::nullopt if no filtering done. Currently only
                                         //!< reported by Parquet readers
+  size_t total_compressed_bytes{0};     //!< Total compressed bytes (on-disk) of all selected column
+                                        //!< chunks across all selected row groups. Currently only
+                                        //!< computed for Parquet readers
+  size_t total_uncompressed_bytes{0};   //!< Total uncompressed bytes (after decompression) of all
+                                        //!< selected column chunks across all selected row groups.
+                                        //!< Currently only computed for Parquet readers
+  std::optional<parquet_pipeline_stats>
+    pipeline_stats;  //!< Per-stage byte count statistics for the Parquet read pipeline.
+                     //!< nullopt for non-Parquet readers
 };
 
 /**

@@ -854,6 +854,8 @@ table_with_metadata hybrid_scan_reader_impl::read_chunk_internal(
     out_metadata.num_row_groups_after_bloom_filter =
       _file_itm_data.surviving_row_groups.after_bloom_filter;
   }
+  out_metadata.total_compressed_bytes   = _file_itm_data.total_compressed_bytes;
+  out_metadata.total_uncompressed_bytes = _file_itm_data.total_uncompressed_bytes;
 
   // no work to do (this can happen on the first pass if we have no rows to read)
   if (!has_more_work()) {
@@ -896,6 +898,9 @@ table_with_metadata hybrid_scan_reader_impl::read_chunk_internal(
 
   // Parse data into the output buffers.
   decode_page_data(mode, read_info.skip_rows, read_info.num_rows);
+
+  // Copy pipeline stats after all stages (including decode) have run
+  out_metadata.pipeline_stats = _file_itm_data.pipeline_stats;
 
   // Create the final output cudf columns.
   for (size_t i = 0; i < _output_buffers.size(); ++i) {

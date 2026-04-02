@@ -16,6 +16,7 @@
 #include <rmm/cuda_stream_view.hpp>
 
 #include <cuda/functional>
+#include <tuple>
 #include <cuda/std/utility>
 #include <thrust/binary_search.h>
 
@@ -186,16 +187,18 @@ std::vector<row_range> compute_page_splits_by_row(device_span<cumulative_page_in
  * @param stream CUDA stream used for device memory operations and kernel launches
  * @param mr Device memory resource used to allocate buffers
  *
- * @return A pair of device buffers containing the decompressed data for dictionary and
- * non-dictionary pages, respectively.
+ * @return A tuple of: device buffer for dictionary pages, device buffer for non-dictionary pages,
+ * and a vector of per-codec decompression stage statistics.
  */
-[[nodiscard]] std::pair<rmm::device_buffer, rmm::device_buffer> decompress_page_data(
-  host_span<ColumnChunkDesc const> chunks,
-  host_span<PageInfo> pass_pages,
-  host_span<PageInfo> subpass_pages,
-  host_span<bool const> subpass_page_mask,
-  rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr);
+[[nodiscard]] std::tuple<rmm::device_buffer,
+                         rmm::device_buffer,
+                         std::vector<cudf::io::parquet_decompress_stats>>
+decompress_page_data(host_span<ColumnChunkDesc const> chunks,
+                     host_span<PageInfo> pass_pages,
+                     host_span<PageInfo> subpass_pages,
+                     host_span<bool const> subpass_page_mask,
+                     rmm::cuda_stream_view stream,
+                     rmm::device_async_resource_ref mr);
 
 /**
  * @brief Detect malformed parquet input data
@@ -410,6 +413,7 @@ struct codec_stats {
   size_t num_pages              = 0;
   int32_t max_decompressed_size = 0;
   size_t total_decomp_size      = 0;
+  size_t total_compressed_size  = 0;
 
   enum class page_selection { DICT_PAGES, NON_DICT_PAGES };
 

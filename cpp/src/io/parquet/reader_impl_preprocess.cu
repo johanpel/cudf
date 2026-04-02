@@ -548,6 +548,16 @@ void reader_impl::read_compressed_data()
 
   read_chunks_tasks.get();
 
+  // Record IO_READ byte stats
+  {
+    size_t io_bytes = 0;
+    for (auto const& chunk : chunks) {
+      io_bytes += chunk.compressed_size;
+    }
+    _file_itm_data.pipeline_stats.stages.emplace_back(
+      cudf::io::parquet_io_read_stats{io_bytes});
+  }
+
   // Process dataset chunk pages into output columns
   auto const total_pages = _has_page_index ? count_page_headers_with_pgidx(chunks, _stream)
                                            : count_page_headers(chunks, _stream);
@@ -706,6 +716,21 @@ void reader_impl::preprocess_subpass_pages(read_mode mode, size_t chunk_read_lim
   // figure out which kernels to run
   subpass.kernel_mask = get_aggregated_decode_kernel_mask(subpass.pages, _stream);
 
+  // Record PREPROCESS_LEVELS byte stats
+  {
+    auto const& page_mask = subpass_page_mask_span();
+    size_t lvl_bytes      = 0;
+    size_t num_pages      = 0;
+    for (size_t i = 0; i < subpass.pages.size(); ++i) {
+      if (!page_mask.is_empty() && !page_mask[i]) { continue; }
+      lvl_bytes += subpass.pages[i].lvl_bytes[level_type::DEFINITION] +
+                   subpass.pages[i].lvl_bytes[level_type::REPETITION];
+      ++num_pages;
+    }
+    _file_itm_data.pipeline_stats.stages.emplace_back(
+      cudf::io::parquet_preprocess_levels_stats{lvl_bytes, num_pages});
+  }
+
   // Decode definition and repetition levels for all subpass pages
   // so they're available to compute_page_sizes and decode kernels.
   // We can't determine subpass skip_rows & num_rows yet, so we use the pass values.
@@ -752,6 +777,20 @@ void reader_impl::preprocess_subpass_pages(read_mode mode, size_t chunk_read_lim
     // if:
     // - user has passed custom row bounds
     // - we will be doing a chunked read
+    // Record COMPUTE_PAGE_SIZES byte stats
+    {
+      auto const& page_mask = subpass_page_mask_span();
+      size_t total_bytes    = 0;
+      size_t num_pages      = 0;
+      for (size_t i = 0; i < subpass.pages.size(); ++i) {
+        if (!page_mask.is_empty() && !page_mask[i]) { continue; }
+        total_bytes += subpass.pages[i].uncompressed_page_size;
+        ++num_pages;
+      }
+      _file_itm_data.pipeline_stats.stages.emplace_back(
+        cudf::io::parquet_compute_page_sizes_stats{total_bytes, num_pages});
+    }
+
     compute_page_sizes(subpass.pages,
                        pass.chunks,
                        subpass_page_mask_span(),
@@ -815,6 +854,22 @@ void reader_impl::preprocess_subpass_pages(read_mode mode, size_t chunk_read_lim
       });
 
     if (!_has_page_index || has_flba) {
+      // Record COMPUTE_STRING_SIZES byte stats
+      {
+        auto const& page_mask = subpass_page_mask_span();
+        size_t total_bytes    = 0;
+        size_t num_pages      = 0;
+        for (size_t i = 0; i < subpass.pages.size(); ++i) {
+          if (!page_mask.is_empty() && !page_mask[i]) { continue; }
+          if (BitAnd(subpass.pages[i].kernel_mask, STRINGS_MASK) != 0) {
+            total_bytes += subpass.pages[i].uncompressed_page_size;
+            ++num_pages;
+          }
+        }
+        _file_itm_data.pipeline_stats.stages.emplace_back(
+          cudf::io::parquet_compute_string_sizes_stats{total_bytes, num_pages});
+      }
+
       constexpr bool compute_all_string_sizes = true;
       compute_page_string_sizes_pass1(subpass.pages,
                                       pass.chunks,

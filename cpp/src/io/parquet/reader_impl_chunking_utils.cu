@@ -139,6 +139,7 @@ void codec_stats::add_pages(host_span<ColumnChunkDesc const> chunks,
         is_page_compressed) {
       ++num_pages;
       total_decomp_size += page.uncompressed_page_size;
+      total_compressed_size += page.compressed_page_size;
       max_decompressed_size = std::max(max_decompressed_size, page.uncompressed_page_size);
     }
   });
@@ -451,7 +452,10 @@ std::vector<row_range> compute_page_splits_by_row(device_span<cumulative_page_in
   return splits;
 }
 
-[[nodiscard]] std::pair<rmm::device_buffer, rmm::device_buffer> decompress_page_data(
+[[nodiscard]] std::tuple<rmm::device_buffer,
+                         rmm::device_buffer,
+                         std::vector<cudf::io::parquet_decompress_stats>>
+decompress_page_data(
   host_span<ColumnChunkDesc const> chunks,
   host_span<PageInfo> pass_pages,
   host_span<PageInfo> subpass_pages,
@@ -640,7 +644,17 @@ std::vector<row_range> compute_page_splits_by_row(device_span<cumulative_page_in
                          stream),
     "Error during decompression");
 
-  return {std::move(pass_decomp_pages), std::move(subpass_decomp_pages)};
+  // Build per-codec decompression byte stats
+  std::vector<cudf::io::parquet_decompress_stats> decomp_stats;
+  for (auto const& codec : codecs) {
+    if (codec.num_pages == 0) { continue; }
+    decomp_stats.push_back({from_parquet_compression(codec.compression_type),
+                            codec.total_compressed_size,
+                            codec.total_decomp_size,
+                            codec.num_pages});
+  }
+
+  return {std::move(pass_decomp_pages), std::move(subpass_decomp_pages), std::move(decomp_stats)};
 }
 
 void detect_malformed_pages(device_span<PageInfo const> pages,

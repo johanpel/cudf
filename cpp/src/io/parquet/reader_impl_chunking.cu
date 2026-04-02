@@ -348,13 +348,17 @@ void reader_impl::setup_next_subpass(read_mode mode)
   // decompress the data pages in this subpass; also decompress the dictionary pages in this pass,
   // if this is the first subpass in the pass
   if (pass.has_compressed_data) {
-    auto [pass_data, subpass_data] =
+    auto [pass_data, subpass_data, decomp_stats] =
       decompress_page_data(pass.chunks,
                            is_first_subpass ? pass.pages : host_span<PageInfo>{},
                            subpass.pages,
                            subpass_page_mask_span(),
                            _stream,
                            _mr);
+
+    for (auto& ds : decomp_stats) {
+      _file_itm_data.pipeline_stats.stages.emplace_back(std::move(ds));
+    }
 
     if (is_first_subpass) {
       pass.decomp_dict_data = std::move(pass_data);
@@ -504,6 +508,9 @@ void reader_impl::create_global_chunk_info()
                           list_bytes_per_row_est,
                           schema.type == Type::BYTE_ARRAY and _strings_to_categorical,
                           rg.source_index);
+
+      _file_itm_data.total_compressed_bytes += col_meta.total_compressed_size;
+      _file_itm_data.total_uncompressed_bytes += col_meta.total_uncompressed_size;
     }
     // Adjust for skip_rows when updating the remaining rows after the first group
     remaining_rows -=

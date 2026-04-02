@@ -2256,3 +2256,45 @@ TEST_F(ParquetChunkedReaderTest, ReadStringsWithRowBounds)
   EXPECT_GT(num_chunks, 1);
   CUDF_TEST_EXPECT_TABLES_EQUAL(expected[0], chunked_result->view());
 }
+
+TEST_F(ParquetChunkedReaderTest, TestChunkedReadByteCountStatistics)
+{
+  auto constexpr num_rows = 40'000;
+
+  std::vector<std::unique_ptr<cudf::column>> input_columns;
+  auto const value_iter = thrust::make_counting_iterator(0);
+  input_columns.emplace_back(int32s_col(value_iter, value_iter + num_rows).release());
+  input_columns.emplace_back(int64s_col(value_iter, value_iter + num_rows).release());
+
+  auto const [expected, filepath] =
+    write_file(input_columns, "chunked_read_byte_counts", false, false);
+
+  // Use a small output limit to force multiple chunks
+  auto const read_opts =
+    cudf::io::parquet_reader_options::builder(cudf::io::source_info{filepath}).build();
+  auto reader = cudf::io::chunked_parquet_reader(240'000, read_opts);
+
+  auto num_chunks             = 0;
+  size_t first_compressed     = 0;
+  size_t first_uncompressed   = 0;
+  bool all_chunks_match       = true;
+
+  while (reader.has_next()) {
+    auto chunk = reader.read_chunk();
+    if (num_chunks == 0) {
+      first_compressed   = chunk.metadata.total_compressed_bytes;
+      first_uncompressed = chunk.metadata.total_uncompressed_bytes;
+      EXPECT_GT(first_compressed, 0);
+      EXPECT_GT(first_uncompressed, 0);
+    } else {
+      if (chunk.metadata.total_compressed_bytes != first_compressed ||
+          chunk.metadata.total_uncompressed_bytes != first_uncompressed) {
+        all_chunks_match = false;
+      }
+    }
+    ++num_chunks;
+  }
+
+  EXPECT_GT(num_chunks, 1);
+  EXPECT_TRUE(all_chunks_match) << "All chunks should report the same file-level byte counts";
+}

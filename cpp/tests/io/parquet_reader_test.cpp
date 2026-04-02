@@ -4406,3 +4406,229 @@ TEST_F(ParquetReaderTest, DuplicateColumnSelection)
     EXPECT_THROW(cudf::io::read_parquet(read_opts), cudf::logic_error);
   }
 }
+
+TEST_F(ParquetReaderTest, ByteCountStatisticsCompressed)
+{
+  constexpr auto num_rows = 50000;
+  auto table              = create_compressible_fixed_table<int>(4, num_rows, 128, false);
+
+  // Write with SNAPPY compression
+  std::vector<char> compressed_buf;
+  cudf::io::parquet_writer_options write_opts =
+    cudf::io::parquet_writer_options::builder(cudf::io::sink_info{&compressed_buf}, *table)
+      .compression(cudf::io::compression_type::SNAPPY);
+  cudf::io::write_parquet(write_opts);
+
+  // Read back and verify byte count statistics
+  cudf::io::parquet_reader_options read_opts = cudf::io::parquet_reader_options::builder(
+    cudf::io::source_info{cudf::host_span<std::byte const>{
+      reinterpret_cast<std::byte const*>(compressed_buf.data()), compressed_buf.size()}});
+  auto result = cudf::io::read_parquet(read_opts);
+
+  EXPECT_GT(result.metadata.total_compressed_bytes, 0);
+  EXPECT_GT(result.metadata.total_uncompressed_bytes, 0);
+  EXPECT_GE(result.metadata.total_uncompressed_bytes, result.metadata.total_compressed_bytes);
+}
+
+TEST_F(ParquetReaderTest, ByteCountStatisticsUncompressed)
+{
+  constexpr auto num_rows = 10000;
+  auto table              = create_random_fixed_table<int>(4, num_rows, false);
+
+  // Write without compression
+  std::vector<char> buf;
+  cudf::io::parquet_writer_options write_opts =
+    cudf::io::parquet_writer_options::builder(cudf::io::sink_info{&buf}, *table)
+      .compression(cudf::io::compression_type::NONE);
+  cudf::io::write_parquet(write_opts);
+
+  cudf::io::parquet_reader_options read_opts = cudf::io::parquet_reader_options::builder(
+    cudf::io::source_info{cudf::host_span<std::byte const>{
+      reinterpret_cast<std::byte const*>(buf.data()), buf.size()}});
+  auto result = cudf::io::read_parquet(read_opts);
+
+  EXPECT_GT(result.metadata.total_compressed_bytes, 0);
+  EXPECT_EQ(result.metadata.total_compressed_bytes, result.metadata.total_uncompressed_bytes);
+}
+
+TEST_F(ParquetReaderTest, ByteCountStatisticsColumnSelection)
+{
+  constexpr auto num_rows = 10000;
+  auto table              = create_compressible_fixed_table<int>(4, num_rows, 128, false);
+
+  std::vector<char> buf;
+  cudf::io::parquet_writer_options write_opts =
+    cudf::io::parquet_writer_options::builder(cudf::io::sink_info{&buf}, *table)
+      .compression(cudf::io::compression_type::SNAPPY);
+  cudf::io::write_parquet(write_opts);
+
+  auto const source = cudf::io::source_info{cudf::host_span<std::byte const>{
+    reinterpret_cast<std::byte const*>(buf.data()), buf.size()}};
+
+  // Read all columns
+  auto all_result = cudf::io::read_parquet(cudf::io::parquet_reader_options::builder(source));
+
+  // Read subset of columns by index
+  auto subset_opts = cudf::io::parquet_reader_options::builder(source).build();
+  subset_opts.set_column_indices({0, 1});
+  auto subset_result = cudf::io::read_parquet(subset_opts);
+
+  EXPECT_GT(all_result.metadata.total_compressed_bytes, 0);
+  EXPECT_GT(subset_result.metadata.total_compressed_bytes, 0);
+  EXPECT_LT(subset_result.metadata.total_compressed_bytes,
+            all_result.metadata.total_compressed_bytes);
+  EXPECT_LT(subset_result.metadata.total_uncompressed_bytes,
+            all_result.metadata.total_uncompressed_bytes);
+}
+
+// Helper: find first entry of a given variant alternative in pipeline stats
+template <typename T>
+T const* find_stage(cudf::io::parquet_pipeline_stats const& stats)
+{
+  for (auto const& s : stats.stages) {
+    if (auto const* p = std::get_if<T>(&s)) { return p; }
+  }
+  return nullptr;
+}
+
+// Helper: collect all entries of a given variant alternative
+template <typename T>
+std::vector<T const*> find_all_stages(cudf::io::parquet_pipeline_stats const& stats)
+{
+  std::vector<T const*> result;
+  for (auto const& s : stats.stages) {
+    if (auto const* p = std::get_if<T>(&s)) { result.push_back(p); }
+  }
+  return result;
+}
+
+TEST_F(ParquetReaderTest, CompressedPipelineStats)
+{
+  // Use enough rows that SNAPPY compression actually kicks in (small tables may
+  // stay uncompressed because the compressed output is larger than the input).
+  constexpr auto num_rows = 500000;
+  auto table              = create_compressible_fixed_table<int>(4, num_rows, 512, false);
+
+  std::vector<char> buf;
+  cudf::io::parquet_writer_options write_opts =
+    cudf::io::parquet_writer_options::builder(cudf::io::sink_info{&buf}, *table)
+      .compression(cudf::io::compression_type::SNAPPY);
+  cudf::io::write_parquet(write_opts);
+
+  cudf::io::parquet_reader_options read_opts = cudf::io::parquet_reader_options::builder(
+    cudf::io::source_info{cudf::host_span<std::byte const>{
+      reinterpret_cast<std::byte const*>(buf.data()), buf.size()}});
+  auto result = cudf::io::read_parquet(read_opts);
+
+  ASSERT_TRUE(result.metadata.pipeline_stats.has_value());
+  auto const& stats = *result.metadata.pipeline_stats;
+  EXPECT_FALSE(stats.stages.empty());
+
+  // Verify IO_READ stage
+  auto const* io_read = find_stage<cudf::io::parquet_io_read_stats>(stats);
+  ASSERT_NE(io_read, nullptr);
+  EXPECT_GT(io_read->bytes, 0);
+  EXPECT_EQ(io_read->bytes, result.metadata.total_compressed_bytes);
+
+  // Verify DECOMPRESS stage with SNAPPY codec
+  auto decomps = find_all_stages<cudf::io::parquet_decompress_stats>(stats);
+  ASSERT_FALSE(decomps.empty());
+  auto snappy_it = std::find_if(decomps.begin(), decomps.end(), [](auto const* d) {
+    return d->codec == cudf::io::compression_type::SNAPPY;
+  });
+  ASSERT_NE(snappy_it, decomps.end());
+  EXPECT_GT((*snappy_it)->num_pages, 0);
+  EXPECT_GT((*snappy_it)->input_bytes, 0);
+  EXPECT_GT((*snappy_it)->output_bytes, 0);
+  EXPECT_LT((*snappy_it)->input_bytes, (*snappy_it)->output_bytes);
+
+  // Verify PREPROCESS_LEVELS stage
+  EXPECT_NE(find_stage<cudf::io::parquet_preprocess_levels_stats>(stats), nullptr);
+
+  // Verify DECODE stage
+  auto decodes = find_all_stages<cudf::io::parquet_decode_stats>(stats);
+  ASSERT_FALSE(decodes.empty());
+  EXPECT_GT(decodes[0]->input_bytes, 0);
+  EXPECT_GT(decodes[0]->num_pages, 0);
+  EXPECT_GT(decodes[0]->kernel_mask, 0u);
+}
+
+TEST_F(ParquetReaderTest, UncompressedPipelineStats)
+{
+  constexpr auto num_rows = 10000;
+  auto table              = create_random_fixed_table<int>(4, num_rows, false);
+
+  std::vector<char> buf;
+  cudf::io::parquet_writer_options write_opts =
+    cudf::io::parquet_writer_options::builder(cudf::io::sink_info{&buf}, *table)
+      .compression(cudf::io::compression_type::NONE);
+  cudf::io::write_parquet(write_opts);
+
+  cudf::io::parquet_reader_options read_opts = cudf::io::parquet_reader_options::builder(
+    cudf::io::source_info{cudf::host_span<std::byte const>{
+      reinterpret_cast<std::byte const*>(buf.data()), buf.size()}});
+  auto result = cudf::io::read_parquet(read_opts);
+
+  ASSERT_TRUE(result.metadata.pipeline_stats.has_value());
+  auto const& stats = *result.metadata.pipeline_stats;
+  EXPECT_FALSE(stats.stages.empty());
+
+  // No DECOMPRESS entries for uncompressed data
+  EXPECT_TRUE(find_all_stages<cudf::io::parquet_decompress_stats>(stats).empty());
+
+  // IO_READ present
+  auto const* io_read = find_stage<cudf::io::parquet_io_read_stats>(stats);
+  ASSERT_NE(io_read, nullptr);
+  EXPECT_GT(io_read->bytes, 0);
+
+  // DECODE present
+  auto decodes = find_all_stages<cudf::io::parquet_decode_stats>(stats);
+  ASSERT_FALSE(decodes.empty());
+  EXPECT_GT(decodes[0]->input_bytes, 0);
+}
+
+TEST_F(ParquetReaderTest, DecodePipelineStats)
+{
+  // Write a table with int + string columns to exercise multiple decode kernels
+  constexpr int num_rows = 5000;
+  auto col0              = cudf::test::fixed_width_column_wrapper<int32_t>(
+    thrust::make_counting_iterator(0), thrust::make_counting_iterator(num_rows));
+  std::vector<std::string> strings(num_rows);
+  for (int i = 0; i < num_rows; ++i) {
+    strings[i] = "string_value_" + std::to_string(i);
+  }
+  auto col1 = cudf::test::strings_column_wrapper(strings.begin(), strings.end());
+  auto tbl  = cudf::table_view{{col0, col1}};
+
+  std::vector<char> buf;
+  cudf::io::parquet_writer_options write_opts =
+    cudf::io::parquet_writer_options::builder(cudf::io::sink_info{&buf}, tbl)
+      .compression(cudf::io::compression_type::NONE);
+  cudf::io::write_parquet(write_opts);
+
+  cudf::io::parquet_reader_options read_opts = cudf::io::parquet_reader_options::builder(
+    cudf::io::source_info{cudf::host_span<std::byte const>{
+      reinterpret_cast<std::byte const*>(buf.data()), buf.size()}});
+  auto result = cudf::io::read_parquet(read_opts);
+
+  ASSERT_TRUE(result.metadata.pipeline_stats.has_value());
+  auto const& stats = *result.metadata.pipeline_stats;
+
+  // At least 2 DECODE entries (one for int, one for string)
+  auto decodes = find_all_stages<cudf::io::parquet_decode_stats>(stats);
+  EXPECT_GE(decodes.size(), 2);
+
+  // All DECODE entries should have nonzero bytes and page counts
+  for (auto const* d : decodes) {
+    EXPECT_GT(d->input_bytes, 0);
+    EXPECT_GT(d->num_pages, 0);
+    EXPECT_GT(d->kernel_mask, 0u);
+  }
+
+  // Sum of DECODE input_bytes should be nonzero
+  size_t total_decode_bytes = 0;
+  for (auto const* d : decodes) {
+    total_decode_bytes += d->input_bytes;
+  }
+  EXPECT_GT(total_decode_bytes, 0);
+}

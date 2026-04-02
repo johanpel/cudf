@@ -48,6 +48,12 @@ struct file_intermediate_data {
   // struct containing the number of remaining row groups after each predicate pushdown filter
   surviving_row_group_metrics surviving_row_groups;
 
+  size_t total_compressed_bytes{0};    // total compressed bytes of selected column chunks
+  size_t total_uncompressed_bytes{0};  // total uncompressed bytes of selected column chunks
+
+  // per-stage byte count statistics accumulated across all passes/subpasses
+  cudf::io::parquet_pipeline_stats pipeline_stats;
+
   size_t _current_input_pass{0};  // current input pass index
   size_t _output_chunk_count{0};  // how many output chunks we have produced
 
