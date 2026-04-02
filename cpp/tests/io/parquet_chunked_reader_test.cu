@@ -2298,3 +2298,41 @@ TEST_F(ParquetChunkedReaderTest, TestChunkedReadByteCountStatistics)
   EXPECT_GT(num_chunks, 1);
   EXPECT_TRUE(all_chunks_match) << "All chunks should report the same file-level byte counts";
 }
+
+TEST_F(ParquetChunkedReaderTest, TestChunkedReadPipelineStats)
+{
+  auto constexpr num_rows = 40'000;
+
+  std::vector<std::unique_ptr<cudf::column>> input_columns;
+  auto const value_iter = thrust::make_counting_iterator(0);
+  input_columns.emplace_back(int32s_col(value_iter, value_iter + num_rows).release());
+  input_columns.emplace_back(int64s_col(value_iter, value_iter + num_rows).release());
+
+  auto const [expected, filepath] =
+    write_file(input_columns, "chunked_read_pipeline_stats", false, false);
+
+  // Use a small output limit to force multiple chunks
+  auto const read_opts =
+    cudf::io::parquet_reader_options::builder(cudf::io::source_info{filepath}).build();
+  auto reader = cudf::io::chunked_parquet_reader(240'000, read_opts);
+
+  auto num_chunks = 0;
+  while (reader.has_next()) {
+    auto chunk = reader.read_chunk();
+    ASSERT_TRUE(chunk.metadata.pipeline_stats.has_value())
+      << "Chunk " << num_chunks << " should have pipeline stats";
+    auto const& stats = *chunk.metadata.pipeline_stats;
+    EXPECT_FALSE(stats.stages.empty()) << "Chunk " << num_chunks << " should have stage entries";
+
+    // Each chunk should have its own DECODE entries
+    bool has_decode = false;
+    for (auto const& s : stats.stages) {
+      if (std::holds_alternative<cudf::io::parquet_decode_stats>(s)) { has_decode = true; }
+    }
+    EXPECT_TRUE(has_decode) << "Chunk " << num_chunks << " should have DECODE stats";
+
+    ++num_chunks;
+  }
+
+  EXPECT_GT(num_chunks, 1);
+}

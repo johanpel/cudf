@@ -740,8 +740,9 @@ table_with_metadata reader_impl::read_chunk_internal(read_mode mode)
   // Parse data into the output buffers.
   decode_page_data(mode, read_info.skip_rows, read_info.num_rows);
 
-  // Copy pipeline stats after all stages (including decode) have run
-  out_metadata.pipeline_stats = _file_itm_data.pipeline_stats;
+  // Move pipeline stats for this chunk, then clear for the next chunk
+  out_metadata.pipeline_stats = std::move(_file_itm_data.pipeline_stats);
+  _file_itm_data.pipeline_stats = cudf::io::parquet_pipeline_stats{};
 
   // Create the final output cudf columns.
   for (size_t i = 0; i < _output_buffers.size(); ++i) {

@@ -716,7 +716,9 @@ void reader_impl::preprocess_subpass_pages(read_mode mode, size_t chunk_read_lim
   // figure out which kernels to run
   subpass.kernel_mask = get_aggregated_decode_kernel_mask(subpass.pages, _stream);
 
-  // Record PREPROCESS_LEVELS byte stats
+  // Record PREPROCESS_LEVELS byte stats.
+  // Note: lvl_bytes is only populated for V2 data pages (from the V2 header).
+  // For V1 pages, levels are encoded inline and lvl_bytes is 0.
   {
     auto const& page_mask = subpass_page_mask_span();
     size_t lvl_bytes      = 0;

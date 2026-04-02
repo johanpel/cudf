@@ -16,9 +16,10 @@
 #include <rmm/cuda_stream_view.hpp>
 
 #include <cuda/functional>
-#include <tuple>
 #include <cuda/std/utility>
 #include <thrust/binary_search.h>
+
+#include <tuple>
 
 namespace cudf::io::parquet::detail {
 

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2019-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -18,8 +18,8 @@
 #include <map>
 #include <memory>
 #include <optional>
-#include <variant>
 #include <string>
+#include <variant>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -283,7 +283,7 @@ struct parquet_decompress_stats {
  * @brief Byte statistics for the PREPROCESS_LEVELS stage (def/rep level decoding).
  */
 struct parquet_preprocess_levels_stats {
-  size_t input_bytes;  ///< Total level bytes processed
+  size_t input_bytes;  ///< Total level bytes processed (V2 pages only; 0 for V1 pages)
   size_t num_pages;    ///< Number of pages processed
 };
 

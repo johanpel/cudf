@@ -342,8 +342,12 @@ hybrid_scan_reader_impl::filter_row_groups_with_dictionary_pages(
   auto decompressed_dictionary_page_data = std::optional<rmm::device_buffer>{};
   if (has_compressed_data) {
     // Use the `decompress_page_data` utility to decompress dictionary pages (passed as pass_pages)
-    decompressed_dictionary_page_data =
-      std::get<0>(parquet::detail::decompress_page_data(chunks, pages, {}, {}, stream, mr));
+    auto [decomp_buf, comp_buf, decomp_stats] =
+      parquet::detail::decompress_page_data(chunks, pages, {}, {}, stream, mr);
+    decompressed_dictionary_page_data = std::move(decomp_buf);
+    for (auto& ds : decomp_stats) {
+      _file_itm_data.pipeline_stats.stages.emplace_back(std::move(ds));
+    }
     pages.host_to_device_async(stream);
   }
 
@@ -899,8 +903,9 @@ table_with_metadata hybrid_scan_reader_impl::read_chunk_internal(
   // Parse data into the output buffers.
   decode_page_data(mode, read_info.skip_rows, read_info.num_rows);
 
-  // Copy pipeline stats after all stages (including decode) have run
-  out_metadata.pipeline_stats = _file_itm_data.pipeline_stats;
+  // Move pipeline stats for this chunk, then clear for the next chunk
+  out_metadata.pipeline_stats = std::move(_file_itm_data.pipeline_stats);
+  _file_itm_data.pipeline_stats = cudf::io::parquet_pipeline_stats{};
 
   // Create the final output cudf columns.
   for (size_t i = 0; i < _output_buffers.size(); ++i) {

@@ -4545,6 +4545,8 @@ TEST_F(ParquetReaderTest, CompressedPipelineStats)
   // Verify PREPROCESS_LEVELS stage
   EXPECT_NE(find_stage<cudf::io::parquet_preprocess_levels_stats>(stats), nullptr);
 
+  // COMPUTE_PAGE_SIZES only runs for list columns or chunked reads, so it may not be present here
+
   // Verify DECODE stage
   auto decodes = find_all_stages<cudf::io::parquet_decode_stats>(stats);
   ASSERT_FALSE(decodes.empty());
@@ -4613,6 +4615,8 @@ TEST_F(ParquetReaderTest, DecodePipelineStats)
 
   ASSERT_TRUE(result.metadata.pipeline_stats.has_value());
   auto const& stats = *result.metadata.pipeline_stats;
+
+  // COMPUTE_STRING_SIZES only runs for chunked reads with string columns, so may not be present
 
   // At least 2 DECODE entries (one for int, one for string)
   auto decodes = find_all_stages<cudf::io::parquet_decode_stats>(stats);
