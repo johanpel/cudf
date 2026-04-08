@@ -38,6 +38,39 @@ char const* stage_name(cudf::io::parquet_pipeline_stage s)
   }
 }
 
+// decode_kernel_mask values from parquet_gpu.hpp
+char const* decode_kernel_name(uint32_t mask)
+{
+  switch (mask) {
+    case (1 << 0): return "GENERAL";
+    case (1 << 1): return "STRING";
+    case (1 << 2): return "DELTA_BINARY";
+    case (1 << 3): return "DELTA_BYTE_ARRAY";
+    case (1 << 4): return "DELTA_LENGTH_BA";
+    case (1 << 5): return "FIXED_WIDTH_NO_DICT";
+    case (1 << 6): return "FIXED_WIDTH_DICT";
+    case (1 << 7): return "BYTE_STREAM_SPLIT";
+    case (1 << 8): return "BSS_FW_FLAT";
+    case (1 << 9): return "BSS_FW_NESTED";
+    case (1 << 10): return "FW_NO_DICT_NESTED";
+    case (1 << 11): return "FW_DICT_NESTED";
+    case (1 << 12): return "FW_DICT_LIST";
+    case (1 << 13): return "FW_NO_DICT_LIST";
+    case (1 << 14): return "BSS_FW_LIST";
+    case (1 << 15): return "BOOLEAN";
+    case (1 << 16): return "BOOLEAN_NESTED";
+    case (1 << 17): return "BOOLEAN_LIST";
+    case (1 << 18): return "STRING_NESTED";
+    case (1 << 19): return "STRING_LIST";
+    case (1 << 20): return "STRING_DICT";
+    case (1 << 21): return "STRING_DICT_NESTED";
+    case (1 << 22): return "STRING_DICT_LIST";
+    case (1 << 23): return "STRING_STREAM_SPLIT";
+    case (1 << 24): return "STRING_SS_NESTED";
+    default: return "UNKNOWN";
+  }
+}
+
 struct bench_result {
   double cold_ms;  // first iteration
   double warm_ms;  // average of remaining iterations
@@ -194,10 +227,10 @@ int main()
 
     printf("\nPer-stage detail (%dM rows):\n",
            row_counts[std::size(row_counts) - 1] / 1'000'000);
-    printf("%-24s %8s %10s %10s %10s %12s %12s\n",
-           "Stage", "Sub", "Time us", "In MB", "Out MB", "In GB/s", "Out GB/s");
-    printf("%-24s %8s %10s %10s %10s %12s %12s\n",
-           "------------------------", "--------", "----------",
+    printf("%-24s %-20s %10s %10s %10s %12s %12s\n",
+           "Stage", "Kernel", "Time us", "In MB", "Out MB", "In GB/s", "Out GB/s");
+    printf("%-24s %-20s %10s %10s %10s %12s %12s\n",
+           "------------------------", "--------------------", "----------",
            "----------", "----------", "------------", "------------");
 
     if (result.metadata.pipeline_stats.has_value()) {
@@ -250,8 +283,11 @@ int main()
           double time_us = t->duration_ns / 1000.0;
           double time_s  = t->duration_ns / 1e9;
 
-          char sub_buf[16] = "-";
-          if (t->sub_stage_id) { snprintf(sub_buf, sizeof(sub_buf), "0x%x", t->sub_stage_id); }
+          // For DECODE stages, show the kernel name; for others show "-"
+          char const* sub_name = "-";
+          if (t->stage == cudf::io::parquet_pipeline_stage::DECODE && t->sub_stage_id) {
+            sub_name = decode_kernel_name(t->sub_stage_id);
+          }
 
           if (it != bytes_by_key.end() && time_s > 0) {
             double in_mb   = it->second.input_bytes / (1024.0 * 1024.0);
@@ -259,12 +295,12 @@ int main()
             double in_gbs  = (it->second.input_bytes / 1e9) / time_s;
             double out_gbs = (it->second.output_bytes / 1e9) / time_s;
 
-            printf("%-24s %8s %10.1f %10.1f %10.1f %11.1f %11.1f\n",
-                   stage_name(t->stage), sub_buf,
+            printf("%-24s %-20s %10.1f %10.1f %10.1f %11.1f %11.1f\n",
+                   stage_name(t->stage), sub_name,
                    time_us, in_mb, out_mb, in_gbs, out_gbs);
           } else {
-            printf("%-24s %8s %10.1f %10s %10s %12s %12s\n",
-                   stage_name(t->stage), sub_buf,
+            printf("%-24s %-20s %10.1f %10s %10s %12s %12s\n",
+                   stage_name(t->stage), sub_name,
                    time_us, "-", "-", "-", "-");
           }
         }

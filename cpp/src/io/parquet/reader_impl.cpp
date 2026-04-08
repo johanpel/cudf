@@ -198,33 +198,6 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
   // create this before we fork streams
   kernel_error error_code(_stream);
 
-  // Single-pass binning of page bytes by kernel_mask for DECODE stats
-  {
-    auto const& page_mask = subpass_page_mask_span();
-    // mask -> (input_bytes, output_bytes, pages)
-    std::unordered_map<uint32_t, std::tuple<size_t, size_t, size_t>> decode_bin;
-    for (size_t i = 0; i < subpass.pages.size(); ++i) {
-      if (!page_mask.is_empty() && !page_mask[i]) { continue; }
-      auto const m = static_cast<uint32_t>(subpass.pages[i].kernel_mask);
-      if (m == 0) { continue; }
-      auto& [in_bytes, out_bytes, pages] = decode_bin[m];
-      in_bytes += subpass.pages[i].uncompressed_page_size;
-      // Output bytes: for string pages use str_bytes (char data written to output),
-      // for other pages use uncompressed_page_size as a proxy.
-      if (static_cast<uint32_t>(subpass.pages[i].kernel_mask) & STRINGS_MASK) {
-        out_bytes += subpass.pages[i].str_bytes;
-      } else {
-        out_bytes += subpass.pages[i].uncompressed_page_size;
-      }
-      ++pages;
-    }
-    for (auto const& [mask, counts] : decode_bin) {
-      auto const& [in_bytes, out_bytes, pages] = counts;
-      _file_itm_data.pipeline_stats.stages.emplace_back(
-        cudf::io::parquet_decode_stats{mask, in_bytes, out_bytes, pages});
-    }
-  }
-
   // get the number of streams we need from the pool and tell them to wait on the H2D copies
   int const nkernels = std::bitset<32>(kernel_mask).count();
   auto streams       = cudf::detail::fork_streams(_stream, nkernels);
@@ -490,6 +463,35 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
 
   if (auto const error = error_code.value_sync(_stream); error != 0) {
     CUDF_FAIL("Parquet data decode failed with code(s) " + kernel_error::to_string(error));
+  }
+
+  // Single-pass binning of page bytes by kernel_mask for DECODE stats.
+  // Done here (after D2H sync) so that str_bytes is available on the host —
+  // it is computed on the GPU by preprocess_chunk_strings before decode.
+  {
+    auto const& page_mask = subpass_page_mask_span();
+    // mask -> (input_bytes, output_bytes, pages)
+    std::unordered_map<uint32_t, std::tuple<size_t, size_t, size_t>> decode_bin;
+    for (size_t i = 0; i < subpass.pages.size(); ++i) {
+      if (!page_mask.is_empty() && !page_mask[i]) { continue; }
+      auto const m = static_cast<uint32_t>(subpass.pages[i].kernel_mask);
+      if (m == 0) { continue; }
+      auto& [in_bytes, out_bytes, pages] = decode_bin[m];
+      in_bytes += subpass.pages[i].uncompressed_page_size;
+      // Output bytes: for string pages use str_bytes (char data written to output),
+      // for other pages use uncompressed_page_size as a proxy.
+      if (static_cast<uint32_t>(subpass.pages[i].kernel_mask) & STRINGS_MASK) {
+        out_bytes += subpass.pages[i].str_bytes;
+      } else {
+        out_bytes += subpass.pages[i].uncompressed_page_size;
+      }
+      ++pages;
+    }
+    for (auto const& [mask, counts] : decode_bin) {
+      auto const& [in_bytes, out_bytes, pages] = counts;
+      _file_itm_data.pipeline_stats.stages.emplace_back(
+        cudf::io::parquet_decode_stats{mask, in_bytes, out_bytes, pages});
+    }
   }
 
   // For list and string columns, add the final offset to every offset buffer.
