@@ -4713,4 +4713,108 @@ TEST_F(ParquetReaderTest, CuptiTimingObserverNoTimingWithoutObserver)
   auto timings = find_all_stages<cudf::io::parquet_stage_timing>(stats);
   EXPECT_TRUE(timings.empty());
 }
+
+TEST_F(ParquetReaderTest, CuptiTimingOverhead)
+{
+  // Benchmark: measure wall-clock overhead of CUPTI observer on parquet reads.
+  // Mixed column types to exercise multiple decode kernels.
+  constexpr int num_rows   = 10'000'000;
+  constexpr int num_warmup = 3;
+  constexpr int num_iters  = 10;
+
+  // Build a table with int32, int64, float, double, and string columns
+  auto col_int32 = cudf::test::fixed_width_column_wrapper<int32_t>(
+    thrust::make_counting_iterator(0), thrust::make_counting_iterator(num_rows));
+  auto col_int64 = cudf::test::fixed_width_column_wrapper<int64_t>(
+    thrust::make_counting_iterator(0L), thrust::make_counting_iterator(static_cast<int64_t>(num_rows)));
+  auto col_float = cudf::test::fixed_width_column_wrapper<float>(
+    thrust::make_counting_iterator(0), thrust::make_counting_iterator(num_rows));
+  auto col_double = cudf::test::fixed_width_column_wrapper<double>(
+    thrust::make_counting_iterator(0), thrust::make_counting_iterator(num_rows));
+
+  std::vector<std::string> strings(num_rows);
+  for (int i = 0; i < num_rows; ++i) {
+    strings[i] = "val_" + std::to_string(i % 10000);
+  }
+  auto col_str = cudf::test::strings_column_wrapper(strings.begin(), strings.end());
+
+  auto tbl = cudf::table_view{{col_int32, col_int64, col_float, col_double, col_str}};
+
+  std::vector<char> buf;
+  cudf::io::parquet_writer_options write_opts =
+    cudf::io::parquet_writer_options::builder(cudf::io::sink_info{&buf}, tbl)
+      .compression(cudf::io::compression_type::SNAPPY);
+  cudf::io::write_parquet(write_opts);
+
+  auto const src = cudf::io::source_info{cudf::host_span<std::byte const>{
+    reinterpret_cast<std::byte const*>(buf.data()), buf.size()}};
+
+  auto run_reads = [&](cudf::io::kernel_timing_observer* observer) {
+    for (int i = 0; i < num_warmup; ++i) {
+      cudf::io::parquet_reader_options opts =
+        cudf::io::parquet_reader_options::builder(src);
+      if (observer) { opts.set_timing_observer(observer); }
+      cudf::io::read_parquet(opts);
+    }
+    auto t0 = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < num_iters; ++i) {
+      cudf::io::parquet_reader_options opts =
+        cudf::io::parquet_reader_options::builder(src);
+      if (observer) { opts.set_timing_observer(observer); }
+      cudf::io::read_parquet(opts);
+    }
+    auto t1 = std::chrono::high_resolution_clock::now();
+    return std::chrono::duration<double, std::milli>(t1 - t0).count() / num_iters;
+  };
+
+  // Collect a single read with timing entries for display
+  auto collect_timings = [&](cudf::io::kernel_timing_observer& obs) {
+    cudf::io::parquet_reader_options opts =
+      cudf::io::parquet_reader_options::builder(src);
+    opts.set_timing_observer(&obs);
+    return cudf::io::read_parquet(opts);
+  };
+
+  printf("\n=== CUPTI Timing Observer Overhead ===\n");
+  printf("Parquet file size:  %.1f MB (SNAPPY compressed)\n", buf.size() / (1024.0 * 1024.0));
+  printf("Columns: 5 (int32, int64, float, double, string), Rows: %d\n", num_rows);
+  printf("Iterations: %d (warmup: %d)\n", num_iters, num_warmup);
+
+  double const baseline_ms = run_reads(nullptr);
+  printf("Baseline (no observer): %.3f ms\n", baseline_ms);
+
+  cudf::io::cupti_timing_observer observer;  // tries HES, falls back to SW tracing
+  double const cupti_ms = run_reads(&observer);
+
+  double const overhead_ms  = cupti_ms - baseline_ms;
+  double const overhead_pct = (overhead_ms / baseline_ms) * 100.0;
+
+  printf("With observer:          %.3f ms  (overhead: %.3f ms / %.2f%%)\n",
+         cupti_ms, overhead_ms, overhead_pct);
+  printf("Active: %s, HES: %s\n",
+         observer.is_active() ? "yes" : "no",
+         observer.is_hes_active() ? "yes" : "no");
+
+  if (observer.is_active()) {
+    auto result  = collect_timings(observer);
+    auto timings =
+      find_all_stages<cudf::io::parquet_stage_timing>(*result.metadata.pipeline_stats);
+    auto stage_name = [](cudf::io::parquet_pipeline_stage s) -> char const* {
+      switch (s) {
+        case cudf::io::parquet_pipeline_stage::IO_READ: return "IO_READ";
+        case cudf::io::parquet_pipeline_stage::DECOMPRESS: return "DECOMPRESS";
+        case cudf::io::parquet_pipeline_stage::PREPROCESS_LEVELS: return "PREPROCESS_LEVELS";
+        case cudf::io::parquet_pipeline_stage::COMPUTE_PAGE_SIZES: return "COMPUTE_PAGE_SIZES";
+        case cudf::io::parquet_pipeline_stage::COMPUTE_STRING_SIZES: return "COMPUTE_STRING_SIZES";
+        case cudf::io::parquet_pipeline_stage::DECODE: return "DECODE";
+        default: return "UNKNOWN";
+      }
+    };
+    for (auto const* t : timings) {
+      printf("  %-22s sub=0x%x  %.3f us\n",
+             stage_name(t->stage), t->sub_stage_id, t->duration_ns / 1000.0);
+    }
+  }
+  printf("======================================\n\n");
+}
 #endif  // CUDF_USE_CUPTI

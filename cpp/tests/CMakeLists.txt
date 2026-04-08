@@ -340,6 +340,16 @@ ConfigureTest(
   GPUS 1
   PERCENT 100
 )
+if(CUDF_USE_CUPTI)
+  add_executable(CUPTI_OVERHEAD_BENCH io/cupti_overhead_bench.cpp)
+  set_target_properties(
+    CUPTI_OVERHEAD_BENCH
+    PROPERTIES RUNTIME_OUTPUT_DIRECTORY "$<BUILD_INTERFACE:${CUDF_BINARY_DIR}/gtests>"
+               CXX_STANDARD 20
+               CXX_STANDARD_REQUIRED ON
+  )
+  target_link_libraries(CUPTI_OVERHEAD_BENCH PRIVATE cudf::cudftestutil_objects cudf)
+endif()
 ConfigureTest(
   HYBRID_SCAN_TEST
   io/experimental/hybrid_scan_composer.cpp
