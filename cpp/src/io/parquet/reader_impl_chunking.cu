@@ -348,6 +348,10 @@ void reader_impl::setup_next_subpass(read_mode mode)
   // decompress the data pages in this subpass; also decompress the dictionary pages in this pass,
   // if this is the first subpass in the pass
   if (pass.has_compressed_data) {
+    if (_timing_observer) {
+      _timing_observer->stage_begin(
+        cudf::io::parquet_pipeline_stage::DECOMPRESS, 0, _stream);
+    }
     auto [pass_data, subpass_data, decomp_stats] =
       decompress_page_data(pass.chunks,
                            is_first_subpass ? pass.pages : host_span<PageInfo>{},
@@ -355,6 +359,10 @@ void reader_impl::setup_next_subpass(read_mode mode)
                            subpass_page_mask_span(),
                            _stream,
                            _mr);
+    if (_timing_observer) {
+      _timing_observer->stage_end(
+        cudf::io::parquet_pipeline_stage::DECOMPRESS, 0, _stream);
+    }
 
     for (auto& ds : decomp_stats) {
       _file_itm_data.pipeline_stats.stages.emplace_back(std::move(ds));

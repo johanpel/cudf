@@ -548,6 +548,13 @@ void reader_impl::read_compressed_data()
 
   read_chunks_tasks.get();
 
+  // TODO: Add observer hooks for IO_READ when memcpy tracking is needed.
+  // This stage performs host-side I/O via datasource::read() followed by
+  // cudaMemcpyAsync H2D transfers. To add hooks, wrap read_column_chunks()
+  // + future.get() with stage_begin/stage_end for parquet_pipeline_stage::IO_READ.
+  // The observer implementation would need to enable CUPTI_ACTIVITY_KIND_MEMCPY
+  // to capture H2D transfer records, filtered by stream ID.
+
   // Record IO_READ byte stats
   {
     size_t io_bytes = 0;
@@ -736,6 +743,10 @@ void reader_impl::preprocess_subpass_pages(read_mode mode, size_t chunk_read_lim
   // Decode definition and repetition levels for all subpass pages
   // so they're available to compute_page_sizes and decode kernels.
   // We can't determine subpass skip_rows & num_rows yet, so we use the pass values.
+  if (_timing_observer) {
+    _timing_observer->stage_begin(
+      cudf::io::parquet_pipeline_stage::PREPROCESS_LEVELS, 0, _stream);
+  }
   detail::preprocess_levels(subpass.pages,
                             pass.chunks,
                             subpass_page_mask_span(),
@@ -743,6 +754,10 @@ void reader_impl::preprocess_subpass_pages(read_mode mode, size_t chunk_read_lim
                             pass.num_rows,
                             pass.level_type_size,
                             _stream);
+  if (_timing_observer) {
+    _timing_observer->stage_end(
+      cudf::io::parquet_pipeline_stage::PREPROCESS_LEVELS, 0, _stream);
+  }
 
   // iterate over all input columns and determine if they contain lists.
   // TODO: we could do this once at the file level instead of every time we get in here. the set of
@@ -793,6 +808,10 @@ void reader_impl::preprocess_subpass_pages(read_mode mode, size_t chunk_read_lim
         cudf::io::parquet_compute_page_sizes_stats{total_bytes, num_pages});
     }
 
+    if (_timing_observer) {
+      _timing_observer->stage_begin(
+        cudf::io::parquet_pipeline_stage::COMPUTE_PAGE_SIZES, 0, _stream);
+    }
     compute_page_sizes(subpass.pages,
                        pass.chunks,
                        subpass_page_mask_span(),
@@ -801,6 +820,10 @@ void reader_impl::preprocess_subpass_pages(read_mode mode, size_t chunk_read_lim
                        true,  // compute num_rows
                        _pass_itm_data->level_type_size,
                        _stream);
+    if (_timing_observer) {
+      _timing_observer->stage_end(
+        cudf::io::parquet_pipeline_stage::COMPUTE_PAGE_SIZES, 0, _stream);
+    }
   }
 
   auto iter = thrust::make_counting_iterator(0);
@@ -873,6 +896,10 @@ void reader_impl::preprocess_subpass_pages(read_mode mode, size_t chunk_read_lim
       }
 
       constexpr bool compute_all_string_sizes = true;
+      if (_timing_observer) {
+        _timing_observer->stage_begin(
+          cudf::io::parquet_pipeline_stage::COMPUTE_STRING_SIZES, 0, _stream);
+      }
       compute_page_string_sizes_pass1(subpass.pages,
                                       pass.chunks,
                                       subpass_page_mask_span(),
@@ -883,6 +910,10 @@ void reader_impl::preprocess_subpass_pages(read_mode mode, size_t chunk_read_lim
                                       compute_all_string_sizes,
                                       _pass_itm_data->level_type_size,
                                       _stream);
+      if (_timing_observer) {
+        _timing_observer->stage_end(
+          cudf::io::parquet_pipeline_stage::COMPUTE_STRING_SIZES, 0, _stream);
+      }
     }
     // set str_bytes_all
     thrust::for_each(rmm::exec_policy_nosync(_stream),

@@ -50,6 +50,7 @@ option(
   OFF
 )
 option(DISABLE_DEPRECATION_WARNINGS "Disable warnings generated from deprecated declarations." OFF)
+option(CUDF_USE_CUPTI "Build with CUPTI kernel timing observer support" OFF)
 
 # Option to enable line info in CUDA device compilation to allow introspection when profiling /
 # memchecking
@@ -557,6 +558,7 @@ add_library(
   src/io/parquet/writer_impl.cu
   src/io/parquet/writer_impl_helpers.cpp
   src/io/parquet/decode_fixed.cu
+  $<$<BOOL:${CUDF_USE_CUPTI}>:src/io/parquet/cupti_timing_observer.cpp>
   src/io/statistics/orc_column_statistics.cu
   src/io/statistics/parquet_column_statistics.cu
   src/io/text/byte_range_info.cpp
@@ -981,6 +983,7 @@ target_compile_definitions(cudf PRIVATE $<$<BOOL:${CUDF_KVIKIO_REMOTE_IO}>:CUDF_
 # Remove this after upgrading to a CCCL that has a proper CMake option. See
 # https://github.com/NVIDIA/cccl/pull/2844
 target_compile_definitions(cudf PRIVATE THRUST_FORCE_32_BIT_OFFSET_TYPE=1 CCCL_AVOID_SORT_UNROLL=1)
+target_compile_definitions(cudf PUBLIC $<$<BOOL:${CUDF_USE_CUPTI}>:CUDF_USE_CUPTI>)
 
 # Compile stringified JIT sources first
 add_dependencies(cudf jitify_preprocess_run)
@@ -991,6 +994,7 @@ target_link_libraries(
   PUBLIC CCCL::CCCL rapids_logger::rapids_logger rmm::rmm $<BUILD_LOCAL_INTERFACE:BS::thread_pool>
   PRIVATE $<BUILD_LOCAL_INTERFACE:nvtx3::nvtx3-cpp> cuco::cuco ZLIB::ZLIB nvcomp::nvcomp
           kvikio::kvikio nanoarrow::nanoarrow zstd
+          $<$<BOOL:${CUDF_USE_CUPTI}>:CUDA::cupti>
 )
 
 # Add Conda library, and include paths if specified

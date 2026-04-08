@@ -107,6 +107,10 @@ class parquet_reader_options {
   // case-insensitive matches, the first matched column is selected
   bool _case_sensitive_names = true;
 
+  // Optional observer for collecting GPU kernel timing per pipeline stage.
+  // Non-owning pointer; caller manages lifetime.
+  kernel_timing_observer* _timing_observer = nullptr;
+
   std::optional<std::vector<reader_column_schema>> _reader_column_schema;
 
   /**
@@ -297,6 +301,13 @@ class parquet_reader_options {
    * @return `true` if column name matching is case sensitive (default)
    */
   [[nodiscard]] bool is_enabled_case_sensitive_names() const { return _case_sensitive_names; }
+
+  /**
+   * @brief Returns the kernel timing observer, if set.
+   *
+   * @return Non-owning pointer to the timing observer, or nullptr
+   */
+  [[nodiscard]] kernel_timing_observer* get_timing_observer() const { return _timing_observer; }
 
   /**
    * @brief Set a new source location
@@ -533,6 +544,17 @@ class parquet_reader_options {
    * @param val Boolean indicating whether to enable case-sensitive matching.
    */
   void enable_case_sensitive_names(bool val) { _case_sensitive_names = val; }
+
+  /**
+   * @brief Sets the kernel timing observer for collecting GPU kernel timing.
+   *
+   * The observer receives callbacks at pipeline stage boundaries and collects
+   * kernel execution timing data. The reader does not own the observer; the
+   * caller must ensure it outlives the reader.
+   *
+   * @param observer Non-owning pointer to a kernel_timing_observer, or nullptr to disable
+   */
+  void set_timing_observer(kernel_timing_observer* observer) { _timing_observer = observer; }
 };
 
 /**

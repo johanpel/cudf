@@ -309,7 +309,35 @@ struct parquet_compute_string_sizes_stats {
 struct parquet_decode_stats {
   uint32_t kernel_mask;  ///< Decode kernel bitmask identifying the kernel type
   size_t input_bytes;    ///< Uncompressed page bytes decoded
+  size_t output_bytes;   ///< Total bytes written to output column buffers
   size_t num_pages;      ///< Number of pages decoded
+};
+
+/**
+ * @brief Identifies a stage in the Parquet read pipeline.
+ */
+enum class parquet_pipeline_stage : uint8_t {
+  IO_READ,              ///< Source to device transfer
+  DECOMPRESS,           ///< Page decompression (per codec)
+  PREPROCESS_LEVELS,    ///< Definition/repetition level decoding
+  COMPUTE_PAGE_SIZES,   ///< Row counts and nesting sizes
+  COMPUTE_STRING_SIZES, ///< String column byte sizes
+  DECODE                ///< Page data decoding (per kernel type)
+};
+
+/**
+ * @brief GPU kernel timing for a pipeline stage or sub-stage.
+ *
+ * Only present in pipeline stats when a kernel_timing_observer was attached
+ * to the reader. Duration is the sum of all GPU kernel execution times
+ * attributed to this stage/sub-stage.
+ */
+struct parquet_stage_timing {
+  parquet_pipeline_stage stage;  ///< Pipeline stage
+  uint32_t sub_stage_id;         ///< Sub-stage identifier. 0 = whole stage.
+                                 ///<   DECODE: decode_kernel_mask value.
+                                 ///<   DECOMPRESS: compression_type value.
+  uint64_t duration_ns;          ///< Total kernel execution time in nanoseconds
 };
 
 /**
@@ -320,7 +348,8 @@ using parquet_stage_stats = std::variant<parquet_io_read_stats,
                                          parquet_preprocess_levels_stats,
                                          parquet_compute_page_sizes_stats,
                                          parquet_compute_string_sizes_stats,
-                                         parquet_decode_stats>;
+                                         parquet_decode_stats,
+                                         parquet_stage_timing>;
 
 /**
  * @brief Aggregated byte statistics for the Parquet read pipeline.
@@ -331,6 +360,57 @@ using parquet_stage_stats = std::variant<parquet_io_read_stats,
  */
 struct parquet_pipeline_stats {
   std::vector<parquet_stage_stats> stages;  ///< Per-stage stats in pipeline order
+};
+
+/**
+ * @brief Abstract observer for collecting GPU kernel timing during Parquet reads.
+ *
+ * Implementations receive callbacks at pipeline stage boundaries and collect
+ * kernel execution timing data. The CUPTI-based implementation is provided
+ * separately (see cupti_timing_observer). The reader does not own the observer;
+ * the caller controls its lifetime.
+ */
+class kernel_timing_observer {
+ public:
+  virtual ~kernel_timing_observer() = default;
+
+  /**
+   * @brief Called before GPU work for a pipeline stage begins.
+   *
+   * @param stage The pipeline stage about to execute
+   * @param sub_stage_id Sub-stage identifier. 0 for the whole stage.
+   *        For DECODE: the decode_kernel_mask value.
+   *        For DECOMPRESS: the compression_type value.
+   * @param stream The CUDA stream on which work will be launched
+   */
+  virtual void stage_begin(parquet_pipeline_stage stage,
+                           uint32_t sub_stage_id,
+                           rmm::cuda_stream_view stream) = 0;
+
+  /**
+   * @brief Called after GPU work for a pipeline stage has been launched.
+   *
+   * GPU work may still be in flight (async). This marks the end of kernel
+   * launches for this stage on the calling thread.
+   *
+   * @param stage The pipeline stage that just completed launching
+   * @param sub_stage_id Must match the corresponding stage_begin call
+   * @param stream The CUDA stream used
+   */
+  virtual void stage_end(parquet_pipeline_stage stage,
+                         uint32_t sub_stage_id,
+                         rmm::cuda_stream_view stream) = 0;
+
+  /**
+   * @brief Collect accumulated timing data and add it to pipeline stats.
+   *
+   * Called after all GPU work is synchronized. Implementations should drain
+   * any buffered timing records and append parquet_stage_timing entries to
+   * the stats.stages vector.
+   *
+   * @param stats The pipeline stats to populate with timing entries
+   */
+  virtual void populate_stats(parquet_pipeline_stats& stats) = 0;
 };
 
 /**

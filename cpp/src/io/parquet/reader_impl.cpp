@@ -201,18 +201,27 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
   // Single-pass binning of page bytes by kernel_mask for DECODE stats
   {
     auto const& page_mask = subpass_page_mask_span();
-    std::unordered_map<uint32_t, std::pair<size_t, size_t>> decode_bin;  // mask -> (bytes, pages)
+    // mask -> (input_bytes, output_bytes, pages)
+    std::unordered_map<uint32_t, std::tuple<size_t, size_t, size_t>> decode_bin;
     for (size_t i = 0; i < subpass.pages.size(); ++i) {
       if (!page_mask.is_empty() && !page_mask[i]) { continue; }
       auto const m = static_cast<uint32_t>(subpass.pages[i].kernel_mask);
       if (m == 0) { continue; }
-      auto& [bytes, pages] = decode_bin[m];
-      bytes += subpass.pages[i].uncompressed_page_size;
+      auto& [in_bytes, out_bytes, pages] = decode_bin[m];
+      in_bytes += subpass.pages[i].uncompressed_page_size;
+      // Output bytes: for string pages use str_bytes (char data written to output),
+      // for other pages use uncompressed_page_size as a proxy.
+      if (static_cast<uint32_t>(subpass.pages[i].kernel_mask) & STRINGS_MASK) {
+        out_bytes += subpass.pages[i].str_bytes;
+      } else {
+        out_bytes += subpass.pages[i].uncompressed_page_size;
+      }
       ++pages;
     }
     for (auto const& [mask, counts] : decode_bin) {
+      auto const& [in_bytes, out_bytes, pages] = counts;
       _file_itm_data.pipeline_stats.stages.emplace_back(
-        cudf::io::parquet_decode_stats{mask, counts.first, counts.second});
+        cudf::io::parquet_decode_stats{mask, in_bytes, out_bytes, pages});
     }
   }
 
@@ -223,6 +232,12 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
   int s_idx = 0;
 
   auto decode_data = [&](decode_kernel_mask decoder_mask) {
+    auto const sub_id  = static_cast<uint32_t>(decoder_mask);
+    auto const& stream = streams[s_idx];
+    if (_timing_observer) {
+      _timing_observer->stage_begin(
+        cudf::io::parquet_pipeline_stage::DECODE, sub_id, stream);
+    }
     detail::decode_page_data(subpass.pages,
                              pass.chunks,
                              num_rows,
@@ -234,6 +249,10 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
                              subpass.page_string_offset_indices,
                              error_code.data(),
                              streams[s_idx++]);
+    if (_timing_observer) {
+      _timing_observer->stage_end(
+        cudf::io::parquet_pipeline_stage::DECODE, sub_id, stream);
+    }
   };
 
   // launch string decoder for plain encoded flat columns
@@ -283,6 +302,12 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
 
   // launch delta byte array decoder
   if (BitAnd(kernel_mask, decode_kernel_mask::DELTA_BYTE_ARRAY) != 0) {
+    auto const sub_id  = static_cast<uint32_t>(decode_kernel_mask::DELTA_BYTE_ARRAY);
+    auto const& stream = streams[s_idx];
+    if (_timing_observer) {
+      _timing_observer->stage_begin(
+        cudf::io::parquet_pipeline_stage::DECODE, sub_id, stream);
+    }
     decode_delta_byte_array(subpass.pages,
                             pass.chunks,
                             num_rows,
@@ -292,10 +317,20 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
                             initial_str_offsets,
                             error_code.data(),
                             streams[s_idx++]);
+    if (_timing_observer) {
+      _timing_observer->stage_end(
+        cudf::io::parquet_pipeline_stage::DECODE, sub_id, stream);
+    }
   }
 
   // launch delta length byte array decoder
   if (BitAnd(kernel_mask, decode_kernel_mask::DELTA_LENGTH_BA) != 0) {
+    auto const sub_id  = static_cast<uint32_t>(decode_kernel_mask::DELTA_LENGTH_BA);
+    auto const& stream = streams[s_idx];
+    if (_timing_observer) {
+      _timing_observer->stage_begin(
+        cudf::io::parquet_pipeline_stage::DECODE, sub_id, stream);
+    }
     decode_delta_length_byte_array(subpass.pages,
                                    pass.chunks,
                                    num_rows,
@@ -305,10 +340,20 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
                                    initial_str_offsets,
                                    error_code.data(),
                                    streams[s_idx++]);
+    if (_timing_observer) {
+      _timing_observer->stage_end(
+        cudf::io::parquet_pipeline_stage::DECODE, sub_id, stream);
+    }
   }
 
   // launch delta binary decoder
   if (BitAnd(kernel_mask, decode_kernel_mask::DELTA_BINARY) != 0) {
+    auto const sub_id  = static_cast<uint32_t>(decode_kernel_mask::DELTA_BINARY);
+    auto const& stream = streams[s_idx];
+    if (_timing_observer) {
+      _timing_observer->stage_begin(
+        cudf::io::parquet_pipeline_stage::DECODE, sub_id, stream);
+    }
     decode_delta_binary(subpass.pages,
                         pass.chunks,
                         num_rows,
@@ -317,6 +362,10 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
                         subpass_page_mask_span(),
                         error_code.data(),
                         streams[s_idx++]);
+    if (_timing_observer) {
+      _timing_observer->stage_end(
+        cudf::io::parquet_pipeline_stage::DECODE, sub_id, stream);
+    }
   }
 
   // launch byte stream split decoder
@@ -336,6 +385,12 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
 
   // launch byte stream split decoder
   if (BitAnd(kernel_mask, decode_kernel_mask::BYTE_STREAM_SPLIT) != 0) {
+    auto const sub_id  = static_cast<uint32_t>(decode_kernel_mask::BYTE_STREAM_SPLIT);
+    auto const& stream = streams[s_idx];
+    if (_timing_observer) {
+      _timing_observer->stage_begin(
+        cudf::io::parquet_pipeline_stage::DECODE, sub_id, stream);
+    }
     decode_split_page_data(subpass.pages,
                            pass.chunks,
                            num_rows,
@@ -344,6 +399,10 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
                            subpass_page_mask_span(),
                            error_code.data(),
                            streams[s_idx++]);
+    if (_timing_observer) {
+      _timing_observer->stage_end(
+        cudf::io::parquet_pipeline_stage::DECODE, sub_id, stream);
+    }
   }
 
   // launch fixed width type decoder
@@ -393,6 +452,12 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
 
   // launch the catch-all page decoder
   if (BitAnd(kernel_mask, decode_kernel_mask::GENERAL) != 0) {
+    auto const sub_id  = static_cast<uint32_t>(decode_kernel_mask::GENERAL);
+    auto const& stream = streams[s_idx];
+    if (_timing_observer) {
+      _timing_observer->stage_begin(
+        cudf::io::parquet_pipeline_stage::DECODE, sub_id, stream);
+    }
     detail::decode_page_data(subpass.pages,
                              pass.chunks,
                              num_rows,
@@ -401,6 +466,10 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
                              subpass_page_mask_span(),
                              error_code.data(),
                              streams[s_idx++]);
+    if (_timing_observer) {
+      _timing_observer->stage_end(
+        cudf::io::parquet_pipeline_stage::DECODE, sub_id, stream);
+    }
   }
 
   // synchronize the streams
@@ -535,7 +604,8 @@ reader_impl::reader_impl(std::size_t chunk_read_limit,
              options.is_enabled_case_sensitive_names()},
     _sources{std::move(sources)},
     _output_chunk_read_limit{chunk_read_limit},
-    _input_pass_read_limit{pass_read_limit}
+    _input_pass_read_limit{pass_read_limit},
+    _timing_observer{options.get_timing_observer()}
 {
   // Open and parse the source dataset metadata
   CUDF_EXPECTS(file_metadatas.empty() or file_metadatas.size() == _sources.size(),
@@ -739,6 +809,11 @@ table_with_metadata reader_impl::read_chunk_internal(read_mode mode)
 
   // Parse data into the output buffers.
   decode_page_data(mode, read_info.skip_rows, read_info.num_rows);
+
+  // Collect timing data from the observer before moving stats out
+  if (_timing_observer) {
+    _timing_observer->populate_stats(_file_itm_data.pipeline_stats);
+  }
 
   // Move pipeline stats for this chunk, then clear for the next chunk
   out_metadata.pipeline_stats = std::move(_file_itm_data.pipeline_stats);

@@ -4636,3 +4636,81 @@ TEST_F(ParquetReaderTest, DecodePipelineStats)
   }
   EXPECT_GT(total_decode_bytes, 0);
 }
+
+#ifdef CUDF_USE_CUPTI
+#include <cudf/io/cupti_timing_observer.hpp>
+
+TEST_F(ParquetReaderTest, CuptiTimingObserver)
+{
+  constexpr auto num_rows = 500000;
+  auto table              = create_compressible_fixed_table<int>(4, num_rows, 512, false);
+
+  std::vector<char> buf;
+  cudf::io::parquet_writer_options write_opts =
+    cudf::io::parquet_writer_options::builder(cudf::io::sink_info{&buf}, *table)
+      .compression(cudf::io::compression_type::SNAPPY);
+  cudf::io::write_parquet(write_opts);
+
+  cudf::io::cupti_timing_observer observer;
+
+  cudf::io::parquet_reader_options read_opts = cudf::io::parquet_reader_options::builder(
+    cudf::io::source_info{cudf::host_span<std::byte const>{
+      reinterpret_cast<std::byte const*>(buf.data()), buf.size()}});
+  read_opts.set_timing_observer(&observer);
+
+  auto result = cudf::io::read_parquet(read_opts);
+
+  ASSERT_TRUE(result.metadata.pipeline_stats.has_value());
+  auto const& stats = *result.metadata.pipeline_stats;
+
+  if (observer.is_active()) {
+    // Timing entries should be present
+    auto timings = find_all_stages<cudf::io::parquet_stage_timing>(stats);
+    EXPECT_FALSE(timings.empty());
+
+    // All timing entries should have nonzero duration
+    for (auto const* t : timings) {
+      EXPECT_GT(t->duration_ns, 0);
+    }
+
+    // At least DECOMPRESS and DECODE stages should have timings
+    bool has_decompress = false;
+    bool has_decode     = false;
+    for (auto const* t : timings) {
+      if (t->stage == cudf::io::parquet_pipeline_stage::DECOMPRESS) has_decompress = true;
+      if (t->stage == cudf::io::parquet_pipeline_stage::DECODE) has_decode = true;
+    }
+    EXPECT_TRUE(has_decompress) << "Expected DECOMPRESS timing";
+    EXPECT_TRUE(has_decode) << "Expected DECODE timing";
+  } else {
+    // CUPTI unavailable (another subscriber) — no timing entries expected
+    auto timings = find_all_stages<cudf::io::parquet_stage_timing>(stats);
+    EXPECT_TRUE(timings.empty());
+  }
+}
+
+TEST_F(ParquetReaderTest, CuptiTimingObserverNoTimingWithoutObserver)
+{
+  constexpr auto num_rows = 10000;
+  auto table              = create_random_fixed_table<int>(4, num_rows, false);
+
+  std::vector<char> buf;
+  cudf::io::parquet_writer_options write_opts =
+    cudf::io::parquet_writer_options::builder(cudf::io::sink_info{&buf}, *table)
+      .compression(cudf::io::compression_type::NONE);
+  cudf::io::write_parquet(write_opts);
+
+  cudf::io::parquet_reader_options read_opts = cudf::io::parquet_reader_options::builder(
+    cudf::io::source_info{cudf::host_span<std::byte const>{
+      reinterpret_cast<std::byte const*>(buf.data()), buf.size()}});
+  // No observer set
+  auto result = cudf::io::read_parquet(read_opts);
+
+  ASSERT_TRUE(result.metadata.pipeline_stats.has_value());
+  auto const& stats = *result.metadata.pipeline_stats;
+
+  // No timing entries without an observer
+  auto timings = find_all_stages<cudf::io::parquet_stage_timing>(stats);
+  EXPECT_TRUE(timings.empty());
+}
+#endif  // CUDF_USE_CUPTI

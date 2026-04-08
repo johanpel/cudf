@@ -517,6 +517,10 @@ class reader_impl {
 
   std::size_t _output_chunk_read_limit{0};  // output chunk size limit in bytes
   std::size_t _input_pass_read_limit{0};    // input pass memory usage limit in bytes
+
+  // Optional observer for collecting GPU kernel timing per pipeline stage.
+  // Non-owning; lifetime managed by caller.
+  kernel_timing_observer* _timing_observer = nullptr;
 };
 
 }  // namespace cudf::io::parquet::detail
